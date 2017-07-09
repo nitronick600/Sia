@@ -14,3 +14,5 @@ doc/whitepaper.pdf
 # IntelliJ IDEA
 .idea
 sia.iml
+.project
+.settings
