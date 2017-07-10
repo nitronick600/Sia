@@ -31,6 +31,10 @@ type Error struct {
 	// be valid or invalid depending on the current state of a module.
 }
 
+var (
+	hub *Hub
+)
+
 // Error implements the error interface for the Error type. It returns only the
 // Message field.
 func (err Error) Error() string {
@@ -153,6 +157,9 @@ func New(requiredUserAgent string, requiredPassword string, cs modules.Consensus
 		wallet:   w,
 	}
 
+	hub = newHub()
+	go hub.run()
+
 	// Register API handlers
 	router := httprouter.New()
 	router.NotFound = http.HandlerFunc(UnrecognizedCallHandler)
@@ -169,6 +176,7 @@ func New(requiredUserAgent string, requiredPassword string, cs modules.Consensus
 		router.GET("/explorer", api.explorerHandler)
 		router.GET("/explorer/blocks/:height", api.explorerBlocksHandler)
 		router.GET("/explorer/hashes/:hash", api.explorerHashHandler)
+		router.GET("/explorer/ws", api.explorerSubscribe)
 	}
 
 	// Gateway API Calls
