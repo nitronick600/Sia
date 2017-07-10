@@ -40,6 +40,15 @@ type processedBlock struct {
 	ConsensusChecksum crypto.Hash
 }
 
+type processedHeader struct {
+	BlockHeader types.BlockHeader
+	Height      types.BlockHeight
+	Depth       types.Target
+	ChildTarget types.Target
+
+	ConsensusChecksum crypto.Hash
+}
+
 // heavierThan returns true if the blockNode is sufficiently heavier than
 // 'cmp'. 'cmp' is expected to be the current block node. "Sufficient" means
 // that the weight of 'bn' exceeds the weight of 'cmp' by:
@@ -49,11 +58,23 @@ func (pb *processedBlock) heavierThan(cmp *processedBlock) bool {
 	return requirement.Cmp(pb.Depth) > 0 // Inversed, because the smaller target is actually heavier.
 }
 
+func (ph *processedHeader) heavierThan(cmp *processedHeader) bool {
+	requirement := cmp.Depth.AddDifficulties(cmp.ChildTarget.MulDifficulty(SurpassThreshold))
+	return requirement.Cmp(ph.Depth) > 0
+}
+
 // childDepth returns the depth of a blockNode's child nodes. The depth is the
 // "sum" of the current depth and current difficulty. See target.Add for more
 // detailed information.
 func (pb *processedBlock) childDepth() types.Target {
 	return pb.Depth.AddDifficulties(pb.ChildTarget)
+}
+
+// childDepth returns the depth of a blockNode's child nodes. The depth is the
+// "sum" of the current depth and current difficulty. See target.Add for more
+// detailed information.
+func (ph *processedHeader) childDepth() types.Target {
+	return ph.Depth.AddDifficulties(ph.ChildTarget)
 }
 
 // targetAdjustmentBase returns the magnitude that the target should be
@@ -117,6 +138,30 @@ func (cs *ConsensusSet) setChildTarget(blockMap *bolt.Bucket, pb *processedBlock
 	adjustment := clampTargetAdjustment(cs.targetAdjustmentBase(blockMap, pb))
 	adjustedRatTarget := new(big.Rat).Mul(parent.ChildTarget.Rat(), adjustment)
 	pb.ChildTarget = types.RatToTarget(adjustedRatTarget)
+}
+
+// newHeader creates a blockNode from a header and adds it to the parent's set of
+// children. The new node is also returned. It necessarily modifies the database
+func (cs *ConsensusSet) newHeader(tx *bolt.Tx, b *processedHeader) *processedHeader {
+	// Create the child node.
+	childID := b.BlockHeader.ID()
+
+	//TODO this could be wrong.
+	child := &processedHeader{
+		BlockHeader: b.BlockHeader,
+
+		Height: b.Height + 1,
+		Depth:  b.childDepth(),
+	}
+
+	// Use the difficulty adjustment algorithm to set the target of the child
+	// block and put the new processed block into the database.
+	headerMap := tx.Bucket(HeaderMap)
+	err := headerMap.Put(childID[:], encoding.Marshal(*child))
+	if build.DEBUG && err != nil {
+		panic(err)
+	}
+	return child
 }
 
 // newChild creates a blockNode from a block and adds it to the parent's set of

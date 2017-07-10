@@ -92,12 +92,15 @@ type ConsensusSet struct {
 	mu         demotemutex.DemoteMutex
 	persistDir string
 	tg         sync.ThreadGroup
+
+	// If using Simplified Payment Verification mode
+	spv bool
 }
 
 // New returns a new ConsensusSet, containing at least the genesis block. If
 // there is an existing block database present in the persist directory, it
 // will be loaded.
-func New(gateway modules.Gateway, bootstrap bool, persistDir string) (*ConsensusSet, error) {
+func New(gateway modules.Gateway, bootstrap bool, persistDir string, spv bool) (*ConsensusSet, error) {
 	// Check for nil dependencies.
 	if gateway == nil {
 		return nil, errNilGateway
@@ -122,6 +125,8 @@ func New(gateway modules.Gateway, bootstrap bool, persistDir string) (*Consensus
 		blockValidator:  NewBlockValidator(),
 
 		persistDir: persistDir,
+
+		spv: spv,
 	}
 
 	// Create the diffs for the genesis siafund outputs.
@@ -164,15 +169,25 @@ func New(gateway modules.Gateway, bootstrap bool, persistDir string) (*Consensus
 		defer cs.tg.Done()
 
 		// Register RPCs
-		gateway.RegisterRPC("SendBlocks", cs.rpcSendBlocks)
+		if !spv {
+			gateway.RegisterRPC("SendBlocks", cs.rpcSendBlocks)
+			gateway.RegisterRPC("SendBlk", cs.rpcSendBlk)
+			gateway.RegisterConnectCall("SendBlocks", cs.threadedReceiveBlocks)
+
+		} else {
+			gateway.RegisterRPC("SendHeaders", cs.threadedReceiveHeaders)
+		}
+		gateway.RegisterConnectCall("SendHeaders", cs.threadedReceiveBlocks)
+
 		gateway.RegisterRPC("RelayHeader", cs.threadedRPCRelayHeader)
-		gateway.RegisterRPC("SendBlk", cs.rpcSendBlk)
-		gateway.RegisterConnectCall("SendBlocks", cs.threadedReceiveBlocks)
+
 		cs.tg.OnStop(func() {
-			cs.gateway.UnregisterRPC("SendBlocks")
+			if !spv {
+				cs.gateway.UnregisterRPC("SendBlocks")
+				cs.gateway.UnregisterRPC("SendBlk")
+				cs.gateway.UnregisterConnectCall("SendBlocks")
+			}
 			cs.gateway.UnregisterRPC("RelayHeader")
-			cs.gateway.UnregisterRPC("SendBlk")
-			cs.gateway.UnregisterConnectCall("SendBlocks")
 		})
 
 		// Mark that we are synced with the network.
@@ -182,6 +197,12 @@ func New(gateway modules.Gateway, bootstrap bool, persistDir string) (*Consensus
 	}()
 
 	return cs, nil
+}
+
+func (cs *ConsensusSet) managedAcceptHeader(bh types.BlockHeader) (blockchainExtended bool, err error) {
+
+	//TODO accept a single header
+	return false, nil
 }
 
 // BlockAtHeight returns the block at a given height.
@@ -335,7 +356,7 @@ func (cs *ConsensusSet) MinimumValidChildTimestamp(id types.BlockID) (timestamp 
 		if err != nil {
 			return err
 		}
-		timestamp = cs.blockRuleHelper.minimumValidChildTimestamp(tx.Bucket(BlockMap), pb)
+		timestamp = cs.blockRuleHelper.minimumValidChildTimestamp(tx.Bucket(BlockMap), pb.Block.ID(), pb.Block.Timestamp)
 		exists = true
 		return nil
 	})
