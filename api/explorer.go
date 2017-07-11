@@ -1,15 +1,22 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
-	"net/http"
-
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/types"
+	"log"
+	"net/http"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/julienschmidt/httprouter"
+)
+
+const (
+	writeTimeout = 5 * time.Second
 )
 
 type (
@@ -75,6 +82,140 @@ type (
 		Transactions []ExplorerTransaction `json:"transactions"`
 	}
 )
+
+type Hub struct {
+	subscribers map[*Subscriber]bool
+	broadcast   chan []byte
+	register    chan *Subscriber
+	unregister  chan *Subscriber
+}
+
+type Subscriber struct {
+	hub  *Hub
+	conn *websocket.Conn
+	send chan []byte
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
+func (s *Subscriber) writer() {
+	defer func() {
+		s.conn.Close()
+	}()
+
+	for {
+		select {
+		case message, ok := <-s.send:
+			{
+				s.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+				if !ok {
+					s.conn.WriteMessage(websocket.CloseMessage, []byte{})
+					log.Println("Error doing stuff")
+					return
+				}
+				w, err := s.conn.NextWriter(websocket.TextMessage)
+				if err != nil {
+					//TODO
+					return
+				}
+				w.Write(message)
+				n := len(s.send)
+				for i := 0; i < n; i++ {
+					w.Write(<-s.send)
+				}
+				if err := w.Close(); err != nil {
+					return
+				}
+			}
+		}
+	}
+}
+
+func newHub() *Hub {
+	return &Hub{
+		broadcast:   make(chan []byte),
+		register:    make(chan *Subscriber),
+		unregister:  make(chan *Subscriber),
+		subscribers: make(map[*Subscriber]bool),
+	}
+}
+
+func (h *Hub) run() {
+	for {
+		select {
+		case subscriber := <-h.register:
+			h.subscribers[subscriber] = true
+		case subscriber := <-h.unregister:
+			if _, ok := h.subscribers[subscriber]; ok {
+				delete(h.subscribers, subscriber)
+				close(subscriber.send)
+			}
+		case message := <-h.broadcast:
+			for subscriber := range h.subscribers {
+				select {
+				case subscriber.send <- message:
+				default:
+					close(subscriber.send)
+					delete(h.subscribers, subscriber)
+				}
+			}
+		}
+	}
+}
+
+func (api *API) explorerSubscribe(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	conn, err := upgrader.Upgrade(w, req, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	subscriber := &Subscriber{hub: hub, conn: conn, send: make(chan []byte, 256)}
+	subscriber.hub.register <- subscriber
+	go subscriber.writer()
+
+}
+
+func (api *API) ProcessConsensusChange(cc modules.ConsensusChange) {
+	for _, block := range cc.AppliedBlocks {
+		_, height, exists := api.explorer.Block(block.ID())
+		if exists {
+			exp := ExplorerBlockGET{Block: api.buildExplorerBlock(height, block)}
+			b, err := json.Marshal(exp)
+			if err != nil {
+				log.Println("Found non existent block shruggie")
+				return
+			}
+			hub.broadcast <- b
+		} else {
+			log.Println("Found non existent block shruggie")
+		}
+	}
+}
+
+// explorerHandler handles API calls to /explorer/blocks/:height.
+func (api *API) explorerBlocksHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	// Parse the height that's being requested.
+	var height types.BlockHeight
+	_, err := fmt.Sscan(ps.ByName("height"), &height)
+	if err != nil {
+		WriteError(w, Error{err.Error()}, http.StatusBadRequest)
+		return
+	}
+
+	// Fetch and return the explorer block.
+	block, exists := api.cs.BlockAtHeight(height)
+	if !exists {
+		WriteError(w, Error{"no block found at input height in call to /explorer/block"}, http.StatusBadRequest)
+		return
+	}
+	WriteJSON(w, ExplorerBlockGET{
+		Block: api.buildExplorerBlock(height, block),
+	})
+}
 
 // buildExplorerTransaction takes a transaction and the height + id of the
 // block it appears in an uses that to build an explorer transaction.
@@ -195,27 +336,6 @@ func (api *API) buildExplorerBlock(height types.BlockHeight, block types.Block) 
 
 		BlockFacts: facts,
 	}
-}
-
-// explorerHandler handles API calls to /explorer/blocks/:height.
-func (api *API) explorerBlocksHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-	// Parse the height that's being requested.
-	var height types.BlockHeight
-	_, err := fmt.Sscan(ps.ByName("height"), &height)
-	if err != nil {
-		WriteError(w, Error{err.Error()}, http.StatusBadRequest)
-		return
-	}
-
-	// Fetch and return the explorer block.
-	block, exists := api.cs.BlockAtHeight(height)
-	if !exists {
-		WriteError(w, Error{"no block found at input height in call to /explorer/block"}, http.StatusBadRequest)
-		return
-	}
-	WriteJSON(w, ExplorerBlockGET{
-		Block: api.buildExplorerBlock(height, block),
-	})
 }
 
 // buildTransactionSet returns the blocks and transactions that are associated
