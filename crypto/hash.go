@@ -15,7 +15,7 @@ import (
 
 	"github.com/NebulousLabs/Sia/encoding"
 
-	"golang.org/x/crypto/blake2b"
+	"crypto/sha256"
 )
 
 const (
@@ -33,9 +33,9 @@ var (
 	ErrHashWrongLen = errors.New("encoded value has the wrong length to be a hash")
 )
 
-// NewHash returns a blake2b 256bit hasher.
+// NewHash returns a sha256 256bit hasher.
 func NewHash() hash.Hash {
-	h, _ := blake2b.New256(nil) // cannot fail with nil argument
+	h := sha256.New() // cannot fail with nil argument
 	return h
 }
 
@@ -53,7 +53,7 @@ func HashAll(objs ...interface{}) (hash Hash) {
 
 // HashBytes takes a byte slice and returns the result.
 func HashBytes(data []byte) Hash {
-	return Hash(blake2b.Sum256(data))
+	return Hash(sha256.Sum256(data))
 }
 
 // HashObject takes an object as input, encodes it using the encoding package,
